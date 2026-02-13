@@ -11,11 +11,11 @@ import { fileURLToPath } from "url";
 // 1. ตั้งค่าพื้นฐาน
 dotenv.config();
 const app = express();
-app.use(express.json({ limit: "10mb" })); // รองรับ JSON ขนาดใหญ่
+app.use(express.json({ limit: "10mb" }));
 
 // 2. ตั้งค่า CORS
 app.use(cors({
-    origin: true, // หรือระบุ ["http://localhost:3000"]
+    origin: true,
     credentials: true,
 }));
 
@@ -25,8 +25,111 @@ const pool = new Pool({
     connectionTimeoutMillis: 5000,
 });
 
-pool.connect().then(c => { console.log("✅ Database Connected!"); c.release(); })
-    .catch(e => console.error("❌ DB Connection Failed:", e.message));
+// --- ฟังก์ชันสร้างตารางอัตโนมัติ (เพิ่มเข้าไปใหม่) ---
+async function initDB() {
+    const createTablesQuery = `
+        CREATE TABLE IF NOT EXISTS admin_users (
+            id SERIAL PRIMARY KEY,
+            username VARCHAR(50) UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            role VARCHAR(20) DEFAULT 'admin'
+        );
+
+        CREATE TABLE IF NOT EXISTS product_categories (
+            id SERIAL PRIMARY KEY,
+            title VARCHAR(255) NOT NULL,
+            slug VARCHAR(255) UNIQUE NOT NULL,
+            sort_order INT DEFAULT 0,
+            is_active BOOLEAN DEFAULT true,
+            subcategories JSONB DEFAULT '[]'
+        );
+
+        CREATE TABLE IF NOT EXISTS service_categories (
+            id SERIAL PRIMARY KEY,
+            title VARCHAR(255) NOT NULL,
+            slug VARCHAR(255) UNIQUE NOT NULL,
+            sort_order INT DEFAULT 0,
+            is_active BOOLEAN DEFAULT true
+        );
+
+        CREATE TABLE IF NOT EXISTS products (
+            id SERIAL PRIMARY KEY,
+            category VARCHAR(255) NOT NULL,
+            subcategory VARCHAR(255) DEFAULT '',
+            name VARCHAR(255) NOT NULL,
+            description TEXT DEFAULT '',
+            image_url TEXT DEFAULT '',
+            sort_order INT DEFAULT 0,
+            is_active BOOLEAN DEFAULT true,
+            cta_url TEXT DEFAULT ''
+        );
+
+        CREATE TABLE IF NOT EXISTS services (
+            id SERIAL PRIMARY KEY,
+            title VARCHAR(255) NOT NULL,
+            description TEXT DEFAULT '',
+            image_url TEXT DEFAULT '',
+            sort_order INT DEFAULT 0,
+            is_active BOOLEAN DEFAULT true
+        );
+
+        CREATE TABLE IF NOT EXISTS news (
+            id SERIAL PRIMARY KEY,
+            title VARCHAR(255) NOT NULL,
+            content TEXT DEFAULT '',
+            image_url TEXT DEFAULT '',
+            sort_order INT DEFAULT 0,
+            is_active BOOLEAN DEFAULT true
+        );
+
+        CREATE TABLE IF NOT EXISTS certifications (
+            id SERIAL PRIMARY KEY,
+            title VARCHAR(255) NOT NULL,
+            image_url TEXT DEFAULT '',
+            sort_order INT DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS customer_logos (
+            id SERIAL PRIMARY KEY,
+            name VARCHAR(255) NOT NULL,
+            image_url TEXT DEFAULT '',
+            sort_order INT DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS contact_page (
+            id INT PRIMARY KEY,
+            heading TEXT,
+            description TEXT,
+            email VARCHAR(255),
+            phone VARCHAR(50),
+            line_label VARCHAR(100),
+            line_url TEXT,
+            line_icon_url TEXT,
+            address_lines JSONB DEFAULT '[]',
+            open_hours TEXT,
+            map_title TEXT,
+            map_embed_url TEXT,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
+        INSERT INTO admin_users (username, password_hash, role)
+        VALUES ('admin', '123456', 'admin')
+        ON CONFLICT (username) DO NOTHING;
+    `;
+
+    try {
+        await pool.query(createTablesQuery);
+        console.log("✅ Database Tables Initialized!");
+    } catch (e) {
+        console.error("❌ Failed to Initialize Database:", e.message);
+    }
+}
+
+pool.connect().then(async (c) => {
+    console.log("✅ Database Connected!");
+    c.release();
+    await initDB();
+}).catch(e => console.error("❌ DB Connection Failed:", e.message));
 
 const JWT_SECRET = process.env.JWT_SECRET || "secret";
 const PORT = Number(process.env.PORT || 4000);
@@ -64,17 +167,15 @@ function generateSlug(title, existingSlug = "") {
     return title.trim().replace(/\s+/g, "-").toLowerCase();
 }
 
-// ฟังก์ชันสร้าง SQL Update แบบ Dynamic (แก้เฉพาะค่าที่ส่งมา)
 async function dynamicUpdate(table, id, updates) {
     const fields = [];
     const values = [];
     let idx = 1;
 
-    // วนลูป key ที่ส่งมาเพื่อสร้าง Query
     for (const [key, value] of Object.entries(updates)) {
-        if (key === 'id') continue; // ข้าม ID
+        if (key === 'id') continue;
 
-        if (key === 'subcategories') {
+        if (key === 'subcategories' || key === 'address_lines') {
             fields.push(`${key}=$${idx++}::jsonb`);
             values.push(JSON.stringify(value));
         } else {
@@ -83,7 +184,7 @@ async function dynamicUpdate(table, id, updates) {
         }
     }
 
-    if (fields.length === 0) return null; // ไม่มีการอัปเดต
+    if (fields.length === 0) return null;
 
     values.push(id);
     const query = `UPDATE ${table} SET ${fields.join(", ")} WHERE id=$${idx} RETURNING *`;
@@ -120,9 +221,7 @@ app.post("/api/upload", authRequired, adminRequired, upload.single("file"), (req
     res.json({ url: `/uploads/${req.file.filename}` });
 });
 
-// ---------------------------------------------------------
-// 🟢 1. หมวดหมู่สินค้า (Product Categories)
-// ---------------------------------------------------------
+// --- 🟢 1. Product Categories ---
 app.get("/api/product-categories", async (req, res) => {
     try {
         const { rows } = await pool.query("SELECT * FROM product_categories ORDER BY sort_order ASC");
@@ -134,7 +233,6 @@ app.post("/api/product-categories", authRequired, adminRequired, async (req, res
     try {
         const { title, sort_order, is_active, subcategories } = req.body;
         const slug = generateSlug(title, req.body.slug);
-
         const { rows } = await pool.query(
             `INSERT INTO product_categories (title, slug, sort_order, is_active, subcategories) VALUES ($1, $2, $3, $4, $5::jsonb) RETURNING *`,
             [title, slug, sort_order || 0, is_active ?? true, JSON.stringify(subcategories || [])]
@@ -145,9 +243,7 @@ app.post("/api/product-categories", authRequired, adminRequired, async (req, res
 
 app.patch("/api/product-categories/:id", authRequired, adminRequired, async (req, res) => {
     try {
-        if (req.body.title && !req.body.slug) {
-            req.body.slug = generateSlug(req.body.title);
-        }
+        if (req.body.title && !req.body.slug) req.body.slug = generateSlug(req.body.title);
         const updated = await dynamicUpdate('product_categories', req.params.id, req.body);
         if (!updated) return res.status(404).json({ message: "Not found or No changes" });
         res.json(updated);
@@ -162,10 +258,7 @@ app.delete("/api/product-categories/:id", authRequired, adminRequired, async (re
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-
-// ---------------------------------------------------------
-// 🟢 2. หมวดหมู่บริการ (Service Categories)
-// ---------------------------------------------------------
+// --- 🟢 2. Service Categories ---
 app.get("/api/service-categories", async (req, res) => {
     try {
         const { rows } = await pool.query("SELECT * FROM service_categories ORDER BY sort_order ASC");
@@ -177,7 +270,6 @@ app.post("/api/service-categories", authRequired, adminRequired, async (req, res
     try {
         const { title, sort_order, is_active } = req.body;
         const slug = generateSlug(title, req.body.slug);
-
         const { rows } = await pool.query(
             `INSERT INTO service_categories (title, slug, sort_order, is_active) VALUES ($1, $2, $3, $4) RETURNING *`,
             [title, slug, sort_order || 0, is_active ?? true]
@@ -188,9 +280,7 @@ app.post("/api/service-categories", authRequired, adminRequired, async (req, res
 
 app.patch("/api/service-categories/:id", authRequired, adminRequired, async (req, res) => {
     try {
-        if (req.body.title && !req.body.slug) {
-            req.body.slug = generateSlug(req.body.title);
-        }
+        if (req.body.title && !req.body.slug) req.body.slug = generateSlug(req.body.title);
         const updated = await dynamicUpdate('service_categories', req.params.id, req.body);
         if (!updated) return res.status(404).json({ message: "Not found" });
         res.json(updated);
@@ -205,9 +295,7 @@ app.delete("/api/service-categories/:id", authRequired, adminRequired, async (re
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ---------------------------------------------------------
-// 🟢 3. เมนูรวม
-// ---------------------------------------------------------
+// --- 🟢 3. Site Menu ---
 app.get("/api/site/menu", async (req, res) => {
     try {
         const p = await pool.query("SELECT id, title, slug, subcategories FROM product_categories WHERE is_active=true ORDER BY sort_order");
@@ -216,9 +304,7 @@ app.get("/api/site/menu", async (req, res) => {
     } catch (e) { res.status(500).json({ error: "Menu Error" }); }
 });
 
-// ---------------------------------------------------------
-// 📦 4. สินค้า (Products) - UPDATED & FIXED
-// ---------------------------------------------------------
+// --- 📦 4. Products ---
 app.get("/api/products", async (req, res) => {
     try {
         const { rows } = await pool.query("SELECT * FROM products ORDER BY sort_order ASC");
@@ -234,48 +320,26 @@ app.get("/api/products/:id", async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ✅ POST: รองรับ subcategory, cta_url และแก้ bug sort_order เป็น null
 app.post("/api/products", authRequired, adminRequired, async (req, res) => {
     try {
         const { category, subcategory, name, description, image_url, sort_order, is_active, cta_url } = req.body;
-
-        // Validation เบื้องต้น
-        if (!category || !name) {
-            return res.status(400).json({ message: "Category and Name are required" });
-        }
+        if (!category || !name) return res.status(400).json({ message: "Category and Name are required" });
 
         const { rows } = await pool.query(
             `INSERT INTO products (category, subcategory, name, description, image_url, sort_order, is_active, cta_url) 
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
-            [
-                category,
-                subcategory || "", // ถ้าไม่มีให้เป็น string ว่าง
-                name,
-                description || "",
-                image_url || "",
-                sort_order || 0,   // ✅ Fix: ถ้าไม่มีค่า ให้ใส่ 0 (ป้องกัน error not-null)
-                is_active ?? true,
-                cta_url || ""      // ✅ เพิ่ม: บันทึก Link CTA
-            ]
+            [category, subcategory || "", name, description || "", image_url || "", sort_order || 0, is_active ?? true, cta_url || ""]
         );
         res.json(rows[0]);
-    } catch (e) {
-        console.error("Insert Product Error:", e);
-        res.status(500).json({ error: e.message });
-    }
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ✅ PATCH: รองรับ subcategory และ cta_url ผ่าน Dynamic Update
 app.patch("/api/products/:id", authRequired, adminRequired, async (req, res) => {
     try {
         const updated = await dynamicUpdate('products', req.params.id, req.body);
-
         if (!updated) return res.status(404).json({ message: "Not found or No changes" });
         res.json(updated);
-    } catch (e) {
-        console.error("Update Product Error:", e);
-        res.status(500).json({ error: e.message });
-    }
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.delete("/api/products/:id", authRequired, adminRequired, async (req, res) => {
@@ -286,9 +350,7 @@ app.delete("/api/products/:id", authRequired, adminRequired, async (req, res) =>
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ---------------------------------------------------------
-// 🛠 5. บริการ (Services)
-// ---------------------------------------------------------
+// --- 🛠 5. Services ---
 app.get("/api/services", async (req, res) => {
     try {
         const { rows } = await pool.query("SELECT * FROM services ORDER BY sort_order ASC");
@@ -326,9 +388,7 @@ app.delete("/api/services/:id", authRequired, adminRequired, async (req, res) =>
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ---------------------------------------------------------
-// 📰 6. ข่าวสาร (News)
-// ---------------------------------------------------------
+// --- 📰 6. News ---
 app.get("/api/news", async (req, res) => {
     try {
         const { rows } = await pool.query("SELECT * FROM news ORDER BY sort_order ASC");
@@ -366,9 +426,7 @@ app.delete("/api/news/:id", authRequired, adminRequired, async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ---------------------------------------------------------
-// 🏆 7. ใบรับรอง (Certifications)
-// ---------------------------------------------------------
+// --- 🏆 7. Certifications ---
 app.get("/api/certifications", async (req, res) => {
     try {
         const { rows } = await pool.query("SELECT * FROM certifications ORDER BY sort_order ASC");
@@ -399,9 +457,7 @@ app.delete("/api/certifications/:id", authRequired, adminRequired, async (req, r
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ---------------------------------------------------------
-// 🖼 8. โลโก้ลูกค้า (Customer Logos)
-// ---------------------------------------------------------
+// --- 🖼 8. Customer Logos ---
 app.get("/api/customer-logos", async (req, res) => {
     try {
         const { rows } = await pool.query("SELECT * FROM customer_logos ORDER BY sort_order ASC");
@@ -431,13 +487,11 @@ app.delete("/api/customer-logos/:id", authRequired, adminRequired, async (req, r
         res.json({ message: "Deleted" });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
-// ---------------------------------------------------------
-// 📞 9. หน้าติดต่อเรา (Contact Page)
-// ---------------------------------------------------------
+
+// --- 📞 9. Contact Page ---
 app.get("/api/site/contact", async (req, res) => {
     try {
         const { rows } = await pool.query("SELECT * FROM contact_page WHERE id=1");
-        // ถ้ายังไม่มีข้อมูล ให้ส่ง object ว่างๆ กลับไป
         const data = rows[0] || {};
         res.json({ data });
     } catch (e) { res.status(500).json({ error: e.message }); }
@@ -445,14 +499,12 @@ app.get("/api/site/contact", async (req, res) => {
 
 app.put("/api/site/contact", authRequired, adminRequired, async (req, res) => {
     try {
-        // รับค่าจาก { data: { ... } } ตามที่ Frontend ส่งมา
         const {
             heading, description, email, phone,
             line_label, line_url, line_icon_url,
             address_lines, open_hours, map_title, map_embed_url
         } = req.body.data;
 
-        // ใช้ UPSERT: ถ้ามี ID=1 ให้ Update ถ้าไม่มีให้ Insert
         const query = `
             INSERT INTO contact_page (
                 id, heading, description, email, phone,
@@ -461,39 +513,27 @@ app.put("/api/site/contact", authRequired, adminRequired, async (req, res) => {
             )
             VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11)
             ON CONFLICT (id) DO UPDATE SET
-                heading = EXCLUDED.heading,
-                description = EXCLUDED.description,
-                email = EXCLUDED.email,
-                phone = EXCLUDED.phone,
-                line_label = EXCLUDED.line_label,
-                line_url = EXCLUDED.line_url,
-                line_icon_url = EXCLUDED.line_icon_url,
-                address_lines = EXCLUDED.address_lines,
-                open_hours = EXCLUDED.open_hours,
-                map_title = EXCLUDED.map_title,
-                map_embed_url = EXCLUDED.map_embed_url,
-                updated_at = CURRENT_TIMESTAMP
+                heading = EXCLUDED.heading, description = EXCLUDED.description,
+                email = EXCLUDED.email, phone = EXCLUDED.phone,
+                line_label = EXCLUDED.line_label, line_url = EXCLUDED.line_url,
+                line_icon_url = EXCLUDED.line_icon_url, address_lines = EXCLUDED.address_lines,
+                open_hours = EXCLUDED.open_hours, map_title = EXCLUDED.map_title,
+                map_embed_url = EXCLUDED.map_embed_url, updated_at = CURRENT_TIMESTAMP
             RETURNING *
         `;
 
         const values = [
             heading, description, email, phone,
             line_label, line_url, line_icon_url,
-            JSON.stringify(address_lines || []), // แปลง Array เป็น JSON String
-            open_hours, map_title, map_embed_url
+            JSON.stringify(address_lines || []), open_hours, map_title, map_embed_url
         ];
 
         const { rows } = await pool.query(query, values);
         res.json({ data: rows[0] });
-    } catch (e) {
-        console.error("Update Contact Error:", e);
-        res.status(500).json({ error: e.message });
-    }
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ==========================================
-// Start Server
-// ==========================================
+// 10. Start Server
 app.listen(PORT, () => {
     console.log(`✅ Server running on http://localhost:${PORT}`);
 });
