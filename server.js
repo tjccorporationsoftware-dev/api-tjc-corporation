@@ -532,6 +532,9 @@ app.put("/api/site/contact", authRequired, adminRequired, async (req, res) => {
         res.json({ data: rows[0] });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
+app.get("/health", (req, res) => {
+  res.json({ status: "ok" });
+});
 
 // 10. Start Server
 app.listen(PORT, "0.0.0.0", () => {
