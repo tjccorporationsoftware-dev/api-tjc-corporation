@@ -14,10 +14,12 @@ const app = express();
 app.use(express.json({ limit: "10mb" }));
 
 // 2. ตั้งค่า CORS
-app.use(cors({
-    origin: true,
-    credentials: true,
-}));
+app.use(
+    cors({
+        origin: true,
+        credentials: true,
+    })
+);
 
 // 3. เชื่อมต่อ Database
 const pool = new Pool({
@@ -25,7 +27,9 @@ const pool = new Pool({
     connectionTimeoutMillis: 5000,
 });
 
-// --- ฟังก์ชันสร้างตารางอัตโนมัติ (เพิ่มเข้าไปใหม่) ---
+// --- ฟังก์ชันสร้างตารางอัตโนมัติ ---
+// ✅ หมายเหตุ: ตอนนี้คุณ restore dump มาแล้ว ตารางมีอยู่จริง
+// โค้ดนี้คงไว้ แต่ปรับ schema news ให้เข้ากับของจริงแบบ "ยืดหยุ่น" มากขึ้น
 async function initDB() {
     const createTablesQuery = `
         CREATE TABLE IF NOT EXISTS admin_users (
@@ -73,13 +77,18 @@ async function initDB() {
             is_active BOOLEAN DEFAULT true
         );
 
+        -- ✅ news: ปรับให้รองรับ schema ที่คุณ dump มา (มี date_label, cover_image_url, gallery)
         CREATE TABLE IF NOT EXISTS news (
             id SERIAL PRIMARY KEY,
-            title VARCHAR(255) NOT NULL,
-            content TEXT DEFAULT '',
-            image_url TEXT DEFAULT '',
+            title TEXT NOT NULL,
+            detail TEXT DEFAULT '',
+            date_label TEXT DEFAULT '',
+            cover_image_url TEXT DEFAULT '',
+            gallery JSONB DEFAULT '[]',
+            is_active BOOLEAN DEFAULT true,
             sort_order INT DEFAULT 0,
-            is_active BOOLEAN DEFAULT true
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
 
         CREATE TABLE IF NOT EXISTS certifications (
@@ -125,38 +134,58 @@ async function initDB() {
     }
 }
 
-pool.connect().then(async (c) => {
-    console.log("✅ Database Connected!");
-    c.release();
-    await initDB();
-}).catch(e => console.error("❌ DB Connection Failed:", e.message));
+pool
+    .connect()
+    .then(async (c) => {
+        console.log("✅ Database Connected!");
+        c.release();
+        await initDB();
+    })
+    .catch((e) => console.error("❌ DB Connection Failed:", e.message));
 
 const JWT_SECRET = process.env.JWT_SECRET || "secret";
 const PORT = Number(process.env.PORT || 4000);
 
 // 4. ตั้งค่า Upload
 const __filename = fileURLToPath(import.meta.url);
-const UPLOAD_DIR = path.join(path.dirname(__filename), "uploads");
+
+// ✅ ให้กำหนดจาก ENV เพื่อชี้ไปยัง directory mount ใน Coolify
+// แนะนำ: UPLOAD_DIR=/data/uploads (ซึ่ง mount มาจาก /home/tjc/DB_TJC-Corporation/uploads)
+const UPLOAD_DIR =
+    process.env.UPLOAD_DIR || path.join(path.dirname(__filename), "uploads");
+
+// url prefix สำหรับคืน path ให้ frontend
+const PUBLIC_UPLOAD_PREFIX = process.env.PUBLIC_UPLOAD_PREFIX || "/uploads";
+
+// สร้างโฟลเดอร์ถ้ายังไม่มี
 if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
-app.use("/uploads", express.static(UPLOAD_DIR));
+
+// ✅ serve static จากโฟลเดอร์ที่ mount จริง
+app.use(PUBLIC_UPLOAD_PREFIX, express.static(UPLOAD_DIR));
 
 const upload = multer({
     storage: multer.diskStorage({
         destination: (_, __, cb) => cb(null, UPLOAD_DIR),
-        filename: (_, file, cb) => cb(null, Date.now() + path.extname(file.originalname)),
-    })
+        filename: (_, file, cb) =>
+            cb(null, Date.now() + path.extname(file.originalname)),
+    }),
 });
 
 // 5. Middleware
 function authRequired(req, res, next) {
     const token = req.headers.authorization?.split(" ")[1];
     if (!token) return res.status(401).json({ message: "No Token" });
-    try { req.user = jwt.verify(token, JWT_SECRET); next(); }
-    catch { res.status(401).json({ message: "Invalid Token" }); }
+    try {
+        req.user = jwt.verify(token, JWT_SECRET);
+        next();
+    } catch {
+        res.status(401).json({ message: "Invalid Token" });
+    }
 }
 
 function adminRequired(req, res, next) {
-    if (req.user?.role !== "admin") return res.status(403).json({ message: "Admin Only" });
+    if (req.user?.role !== "admin")
+        return res.status(403).json({ message: "Admin Only" });
     next();
 }
 
@@ -173,9 +202,10 @@ async function dynamicUpdate(table, id, updates) {
     let idx = 1;
 
     for (const [key, value] of Object.entries(updates)) {
-        if (key === 'id') continue;
+        if (key === "id") continue;
 
-        if (key === 'subcategories' || key === 'address_lines') {
+        // ✅ รองรับ jsonb
+        if (key === "subcategories" || key === "address_lines" || key === "gallery") {
             fields.push(`${key}=$${idx++}::jsonb`);
             values.push(JSON.stringify(value));
         } else {
@@ -187,7 +217,7 @@ async function dynamicUpdate(table, id, updates) {
     if (fields.length === 0) return null;
 
     values.push(id);
-    const query = `UPDATE ${table} SET ${fields.join(", ")} WHERE id=$${idx} RETURNING *`;
+    const query = `UPDATE ${table} SET ${fields.join(", ")}, updated_at=CURRENT_TIMESTAMP WHERE id=$${idx} RETURNING *`;
 
     try {
         const { rows } = await pool.query(query, values);
@@ -206,27 +236,47 @@ async function dynamicUpdate(table, id, updates) {
 app.post("/api/auth/login", async (req, res) => {
     try {
         const { username, password } = req.body;
-        const { rows } = await pool.query("SELECT * FROM public.admin_users WHERE username=$1", [username]);
+        const { rows } = await pool.query(
+            "SELECT * FROM public.admin_users WHERE username=$1",
+            [username]
+        );
         if (!rows.length || rows[0].password_hash !== password) {
             return res.status(401).json({ message: "Login failed" });
         }
-        const token = jwt.sign({ id: rows[0].id, role: rows[0].role }, JWT_SECRET, { expiresIn: "7d" });
+        const token = jwt.sign(
+            { id: rows[0].id, role: rows[0].role },
+            JWT_SECRET,
+            { expiresIn: "7d" }
+        );
         res.json({ token, user: rows[0] });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
 
 // --- Upload ---
-app.post("/api/upload", authRequired, adminRequired, upload.single("file"), (req, res) => {
-    if (!req.file) return res.status(400).json({ message: "No file" });
-    res.json({ url: `/uploads/${req.file.filename}` });
-});
+app.post(
+    "/api/upload",
+    authRequired,
+    adminRequired,
+    upload.single("file"),
+    (req, res) => {
+        if (!req.file) return res.status(400).json({ message: "No file" });
+        // ✅ คืน url ตาม prefix ที่ serve จริง
+        res.json({ url: `${PUBLIC_UPLOAD_PREFIX}/${req.file.filename}` });
+    }
+);
 
 // --- 🟢 1. Product Categories ---
 app.get("/api/product-categories", async (req, res) => {
     try {
-        const { rows } = await pool.query("SELECT * FROM product_categories ORDER BY sort_order ASC");
+        const { rows } = await pool.query(
+            "SELECT * FROM product_categories ORDER BY sort_order ASC"
+        );
         res.json(rows);
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
 
 app.post("/api/product-categories", authRequired, adminRequired, async (req, res) => {
@@ -234,36 +284,50 @@ app.post("/api/product-categories", authRequired, adminRequired, async (req, res
         const { title, sort_order, is_active, subcategories } = req.body;
         const slug = generateSlug(title, req.body.slug);
         const { rows } = await pool.query(
-            `INSERT INTO product_categories (title, slug, sort_order, is_active, subcategories) VALUES ($1, $2, $3, $4, $5::jsonb) RETURNING *`,
+            `INSERT INTO product_categories (title, slug, sort_order, is_active, subcategories)
+       VALUES ($1, $2, $3, $4, $5::jsonb) RETURNING *`,
             [title, slug, sort_order || 0, is_active ?? true, JSON.stringify(subcategories || [])]
         );
         res.json(rows[0]);
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
 
 app.patch("/api/product-categories/:id", authRequired, adminRequired, async (req, res) => {
     try {
         if (req.body.title && !req.body.slug) req.body.slug = generateSlug(req.body.title);
-        const updated = await dynamicUpdate('product_categories', req.params.id, req.body);
+        const updated = await dynamicUpdate("product_categories", req.params.id, req.body);
         if (!updated) return res.status(404).json({ message: "Not found or No changes" });
         res.json(updated);
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
 
 app.delete("/api/product-categories/:id", authRequired, adminRequired, async (req, res) => {
     try {
-        const { rows } = await pool.query("DELETE FROM product_categories WHERE id=$1 RETURNING *", [req.params.id]);
+        const { rows } = await pool.query(
+            "DELETE FROM product_categories WHERE id=$1 RETURNING *",
+            [req.params.id]
+        );
         if (!rows.length) return res.status(404).json({ message: "Not found" });
         res.json({ message: "Deleted" });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
 
 // --- 🟢 2. Service Categories ---
 app.get("/api/service-categories", async (req, res) => {
     try {
-        const { rows } = await pool.query("SELECT * FROM service_categories ORDER BY sort_order ASC");
+        const { rows } = await pool.query(
+            "SELECT * FROM service_categories ORDER BY sort_order ASC"
+        );
         res.json(rows);
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
 
 app.post("/api/service-categories", authRequired, adminRequired, async (req, res) => {
@@ -271,37 +335,53 @@ app.post("/api/service-categories", authRequired, adminRequired, async (req, res
         const { title, sort_order, is_active } = req.body;
         const slug = generateSlug(title, req.body.slug);
         const { rows } = await pool.query(
-            `INSERT INTO service_categories (title, slug, sort_order, is_active) VALUES ($1, $2, $3, $4) RETURNING *`,
+            `INSERT INTO service_categories (title, slug, sort_order, is_active)
+       VALUES ($1, $2, $3, $4) RETURNING *`,
             [title, slug, sort_order || 0, is_active ?? true]
         );
         res.json(rows[0]);
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
 
 app.patch("/api/service-categories/:id", authRequired, adminRequired, async (req, res) => {
     try {
         if (req.body.title && !req.body.slug) req.body.slug = generateSlug(req.body.title);
-        const updated = await dynamicUpdate('service_categories', req.params.id, req.body);
+        const updated = await dynamicUpdate("service_categories", req.params.id, req.body);
         if (!updated) return res.status(404).json({ message: "Not found" });
         res.json(updated);
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
 
 app.delete("/api/service-categories/:id", authRequired, adminRequired, async (req, res) => {
     try {
-        const { rows } = await pool.query("DELETE FROM service_categories WHERE id=$1 RETURNING *", [req.params.id]);
+        const { rows } = await pool.query(
+            "DELETE FROM service_categories WHERE id=$1 RETURNING *",
+            [req.params.id]
+        );
         if (!rows.length) return res.status(404).json({ message: "Not found" });
         res.json({ message: "Deleted" });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
 
 // --- 🟢 3. Site Menu ---
 app.get("/api/site/menu", async (req, res) => {
     try {
-        const p = await pool.query("SELECT id, title, slug, subcategories FROM product_categories WHERE is_active=true ORDER BY sort_order");
-        const s = await pool.query("SELECT id, title, slug FROM service_categories WHERE is_active=true ORDER BY sort_order");
+        const p = await pool.query(
+            "SELECT id, title, slug, subcategories FROM product_categories WHERE is_active=true ORDER BY sort_order"
+        );
+        const s = await pool.query(
+            "SELECT id, title, slug FROM service_categories WHERE is_active=true ORDER BY sort_order"
+        );
         res.json({ products: p.rows, services: s.rows });
-    } catch (e) { res.status(500).json({ error: "Menu Error" }); }
+    } catch (e) {
+        res.status(500).json({ error: "Menu Error" });
+    }
 });
 
 // --- 📦 4. Products ---
@@ -309,7 +389,9 @@ app.get("/api/products", async (req, res) => {
     try {
         const { rows } = await pool.query("SELECT * FROM products ORDER BY sort_order ASC");
         res.json(rows);
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
 
 app.get("/api/products/:id", async (req, res) => {
@@ -317,7 +399,9 @@ app.get("/api/products/:id", async (req, res) => {
         const { rows } = await pool.query("SELECT * FROM products WHERE id=$1", [req.params.id]);
         if (!rows.length) return res.status(404).json({ message: "Not found" });
         res.json(rows[0]);
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
 
 app.post("/api/products", authRequired, adminRequired, async (req, res) => {
@@ -326,20 +410,24 @@ app.post("/api/products", authRequired, adminRequired, async (req, res) => {
         if (!category || !name) return res.status(400).json({ message: "Category and Name are required" });
 
         const { rows } = await pool.query(
-            `INSERT INTO products (category, subcategory, name, description, image_url, sort_order, is_active, cta_url) 
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+            `INSERT INTO products (category, subcategory, name, description, image_url, sort_order, is_active, cta_url)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
             [category, subcategory || "", name, description || "", image_url || "", sort_order || 0, is_active ?? true, cta_url || ""]
         );
         res.json(rows[0]);
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
 
 app.patch("/api/products/:id", authRequired, adminRequired, async (req, res) => {
     try {
-        const updated = await dynamicUpdate('products', req.params.id, req.body);
+        const updated = await dynamicUpdate("products", req.params.id, req.body);
         if (!updated) return res.status(404).json({ message: "Not found or No changes" });
         res.json(updated);
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
 
 app.delete("/api/products/:id", authRequired, adminRequired, async (req, res) => {
@@ -347,7 +435,9 @@ app.delete("/api/products/:id", authRequired, adminRequired, async (req, res) =>
         const { rows } = await pool.query("DELETE FROM products WHERE id=$1 RETURNING *", [req.params.id]);
         if (!rows.length) return res.status(404).json({ message: "Not found" });
         res.json({ message: "Deleted" });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
 
 // --- 🛠 5. Services ---
@@ -355,75 +445,123 @@ app.get("/api/services", async (req, res) => {
     try {
         const { rows } = await pool.query("SELECT * FROM services ORDER BY sort_order ASC");
         res.json(rows);
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
+
 app.get("/api/services/:id", async (req, res) => {
     try {
         const { rows } = await pool.query("SELECT * FROM services WHERE id=$1", [req.params.id]);
         if (!rows.length) return res.status(404).json({ message: "Not found" });
         res.json(rows[0]);
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
+
 app.post("/api/services", authRequired, adminRequired, async (req, res) => {
     try {
         const { title, description, image_url, sort_order, is_active } = req.body;
         const { rows } = await pool.query(
-            `INSERT INTO services (title, description, image_url, sort_order, is_active) VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-            [title, description, image_url, sort_order, is_active]
+            `INSERT INTO services (title, description, image_url, sort_order, is_active)
+       VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+            [title, description || "", image_url || "", sort_order || 0, is_active ?? true]
         );
         res.json(rows[0]);
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
+
 app.patch("/api/services/:id", authRequired, adminRequired, async (req, res) => {
     try {
-        const updated = await dynamicUpdate('services', req.params.id, req.body);
+        const updated = await dynamicUpdate("services", req.params.id, req.body);
         if (!updated) return res.status(404).json({ message: "Not found" });
         res.json(updated);
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
+
 app.delete("/api/services/:id", authRequired, adminRequired, async (req, res) => {
     try {
         await pool.query("DELETE FROM services WHERE id=$1", [req.params.id]);
         res.json({ message: "Deleted" });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
 
 // --- 📰 6. News ---
+// ✅ ปรับให้เข้ากับ schema ที่คุณ dump มา: title, detail, date_label, cover_image_url, gallery
 app.get("/api/news", async (req, res) => {
     try {
         const { rows } = await pool.query("SELECT * FROM news ORDER BY sort_order ASC");
         res.json(rows);
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
+
 app.get("/api/news/:id", async (req, res) => {
     try {
         const { rows } = await pool.query("SELECT * FROM news WHERE id=$1", [req.params.id]);
         if (!rows.length) return res.status(404).json({ message: "Not found" });
         res.json(rows[0]);
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
+
 app.post("/api/news", authRequired, adminRequired, async (req, res) => {
     try {
-        const { title, content, image_url, sort_order, is_active } = req.body;
+        const {
+            title,
+            detail,
+            date_label,
+            cover_image_url,
+            gallery,
+            sort_order,
+            is_active,
+        } = req.body;
+
         const { rows } = await pool.query(
-            `INSERT INTO news (title, content, image_url, sort_order, is_active) VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-            [title, content, image_url, sort_order, is_active]
+            `INSERT INTO news (title, detail, date_label, cover_image_url, gallery, sort_order, is_active)
+       VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7) RETURNING *`,
+            [
+                title,
+                detail || "",
+                date_label || "",
+                cover_image_url || "",
+                JSON.stringify(gallery || []),
+                sort_order || 0,
+                is_active ?? true,
+            ]
         );
         res.json(rows[0]);
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
+
 app.patch("/api/news/:id", authRequired, adminRequired, async (req, res) => {
     try {
-        const updated = await dynamicUpdate('news', req.params.id, req.body);
+        const updated = await dynamicUpdate("news", req.params.id, req.body);
         if (!updated) return res.status(404).json({ message: "Not found" });
         res.json(updated);
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
+
 app.delete("/api/news/:id", authRequired, adminRequired, async (req, res) => {
     try {
         await pool.query("DELETE FROM news WHERE id=$1", [req.params.id]);
         res.json({ message: "Deleted" });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
 
 // --- 🏆 7. Certifications ---
@@ -431,30 +569,41 @@ app.get("/api/certifications", async (req, res) => {
     try {
         const { rows } = await pool.query("SELECT * FROM certifications ORDER BY sort_order ASC");
         res.json(rows);
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
+
 app.post("/api/certifications", authRequired, adminRequired, async (req, res) => {
     try {
         const { title, image_url, sort_order } = req.body;
         const { rows } = await pool.query(
-            `INSERT INTO certifications (title, image_url, sort_order) VALUES ($1, $2, $3) RETURNING *`,
-            [title, image_url, sort_order]
+            `INSERT INTO certifications (title, image_url, sort_order) VALUES ($1,$2,$3) RETURNING *`,
+            [title, image_url || "", sort_order || 0]
         );
         res.json(rows[0]);
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
+
 app.patch("/api/certifications/:id", authRequired, adminRequired, async (req, res) => {
     try {
-        const updated = await dynamicUpdate('certifications', req.params.id, req.body);
+        const updated = await dynamicUpdate("certifications", req.params.id, req.body);
         if (!updated) return res.status(404).json({ message: "Not found" });
         res.json(updated);
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
+
 app.delete("/api/certifications/:id", authRequired, adminRequired, async (req, res) => {
     try {
         await pool.query("DELETE FROM certifications WHERE id=$1", [req.params.id]);
         res.json({ message: "Deleted" });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
 
 // --- 🖼 8. Customer Logos ---
@@ -462,30 +611,41 @@ app.get("/api/customer-logos", async (req, res) => {
     try {
         const { rows } = await pool.query("SELECT * FROM customer_logos ORDER BY sort_order ASC");
         res.json(rows);
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
+
 app.post("/api/customer-logos", authRequired, adminRequired, async (req, res) => {
     try {
         const { name, image_url, sort_order } = req.body;
         const { rows } = await pool.query(
-            `INSERT INTO customer_logos (name, image_url, sort_order) VALUES ($1, $2, $3) RETURNING *`,
-            [name, image_url, sort_order]
+            `INSERT INTO customer_logos (name, image_url, sort_order) VALUES ($1,$2,$3) RETURNING *`,
+            [name, image_url || "", sort_order || 0]
         );
         res.json(rows[0]);
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
+
 app.patch("/api/customer-logos/:id", authRequired, adminRequired, async (req, res) => {
     try {
-        const updated = await dynamicUpdate('customer_logos', req.params.id, req.body);
+        const updated = await dynamicUpdate("customer_logos", req.params.id, req.body);
         if (!updated) return res.status(404).json({ message: "Not found" });
         res.json(updated);
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
+
 app.delete("/api/customer-logos/:id", authRequired, adminRequired, async (req, res) => {
     try {
         await pool.query("DELETE FROM customer_logos WHERE id=$1", [req.params.id]);
         res.json({ message: "Deleted" });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
 
 // --- 📞 9. Contact Page ---
@@ -494,15 +654,25 @@ app.get("/api/site/contact", async (req, res) => {
         const { rows } = await pool.query("SELECT * FROM contact_page WHERE id=1");
         const data = rows[0] || {};
         res.json({ data });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
 
 app.put("/api/site/contact", authRequired, adminRequired, async (req, res) => {
     try {
         const {
-            heading, description, email, phone,
-            line_label, line_url, line_icon_url,
-            address_lines, open_hours, map_title, map_embed_url
+            heading,
+            description,
+            email,
+            phone,
+            line_label,
+            line_url,
+            line_icon_url,
+            address_lines,
+            open_hours,
+            map_title,
+            map_embed_url,
         } = req.body.data;
 
         const query = `
@@ -523,20 +693,33 @@ app.put("/api/site/contact", authRequired, adminRequired, async (req, res) => {
         `;
 
         const values = [
-            heading, description, email, phone,
-            line_label, line_url, line_icon_url,
-            JSON.stringify(address_lines || []), open_hours, map_title, map_embed_url
+            heading,
+            description,
+            email,
+            phone,
+            line_label,
+            line_url,
+            line_icon_url,
+            JSON.stringify(address_lines || []),
+            open_hours,
+            map_title,
+            map_embed_url,
         ];
 
         const { rows } = await pool.query(query, values);
         res.json({ data: rows[0] });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
+
 app.get("/health", (req, res) => {
-  res.json({ status: "ok" });
+    res.json({ status: "ok" });
 });
 
 // 10. Start Server
 app.listen(PORT, "0.0.0.0", () => {
     console.log(`✅ Server running on http://0.0.0.0:${PORT}`);
+    console.log(`✅ Upload Dir: ${UPLOAD_DIR}`);
+    console.log(`✅ Public Upload Prefix: ${PUBLIC_UPLOAD_PREFIX}`);
 });
