@@ -590,10 +590,13 @@ app.get("/api/certifications", async (req, res) => {
 
 app.post("/api/certifications", authRequired, adminRequired, async (req, res) => {
   try {
-    const { title, image_url, sort_order } = req.body;
+    // รับ description เพิ่มเข้ามา
+    const { title, description, image_url, sort_order } = req.body;
+
     const { rows } = await pool.query(
-      `INSERT INTO certifications (title, image_url, sort_order) VALUES ($1, $2, $3) RETURNING *`,
-      [title, image_url, sort_order]
+      `INSERT INTO certifications (title, description, image_url, sort_order) 
+       VALUES ($1, $2, $3, $4) RETURNING *`,
+      [title, description || "", image_url, sort_order || 0]
     );
     res.json(rows[0]);
   } catch (e) {
