@@ -83,6 +83,7 @@ async function initDB() {
     CREATE TABLE IF NOT EXISTS services (
       id SERIAL PRIMARY KEY,
       title VARCHAR(255) NOT NULL,
+      category VARCHAR(255) DEFAULT '',  -- ✅ เพิ่มบรรทัดนี้
       description TEXT DEFAULT '',
       image_url TEXT DEFAULT '',
       sort_order INT DEFAULT 0,
@@ -454,17 +455,17 @@ app.get("/api/services/:id", async (req, res) => {
 
 app.post("/api/services", authRequired, adminRequired, async (req, res) => {
   try {
-    const { title, description, image_url, sort_order, is_active } = req.body;
+    const { title, category, description, image_url, sort_order, is_active } = req.body;
     const { rows } = await pool.query(
-      `INSERT INTO services (title, description, image_url, sort_order, is_active)
-       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-      [title, description, image_url, sort_order, is_active]
+      `INSERT INTO services (title, category, description, image_url, sort_order, is_active)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+      [title, category || "", description, image_url, sort_order, is_active]
     );
     res.json(rows[0]);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
-});
+});;
 
 app.patch("/api/services/:id", authRequired, adminRequired, async (req, res) => {
   try {
