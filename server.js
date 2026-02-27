@@ -83,14 +83,14 @@ async function initDB() {
     CREATE TABLE IF NOT EXISTS services (
       id SERIAL PRIMARY KEY,
       title VARCHAR(255) NOT NULL,
-      category VARCHAR(255) DEFAULT '',  -- ✅ เพิ่มบรรทัดนี้
+      category VARCHAR(255) DEFAULT '',
       description TEXT DEFAULT '',
       image_url TEXT DEFAULT '',
       sort_order INT DEFAULT 0,
       is_active BOOLEAN DEFAULT true
     );
 
-    -- ✅ news: ทำให้ตรงกับ DB ของคุณ (desc1/desc2/date_label/cover_image_url/gallery/created_at/updated_at)
+    -- news table
     CREATE TABLE IF NOT EXISTS public.news (
       id BIGSERIAL PRIMARY KEY,
       title TEXT NOT NULL,
@@ -129,6 +129,15 @@ async function initDB() {
       name VARCHAR(255) NOT NULL,
       image_url TEXT DEFAULT '',
       sort_order INT DEFAULT 0
+    );
+    
+    -- ✅ เพิ่มตาราง partner_logos
+    CREATE TABLE IF NOT EXISTS partner_logos (
+      id SERIAL PRIMARY KEY,
+      name VARCHAR(255) NOT NULL,
+      image_url TEXT DEFAULT '',
+      sort_order INT DEFAULT 0,
+      is_active BOOLEAN DEFAULT true
     );
 
     CREATE TABLE IF NOT EXISTS contact_page (
@@ -169,16 +178,13 @@ pool
   })
   .catch((e) => console.error("❌ DB Connection Failed:", e.message));
 
-// 4. ตั้งค่า Upload (✅ เก็บไฟล์ลงโฟลเดอร์บนเครื่องเซิร์ฟเวอร์ตามที่ต้องการ)
-// ถ้าอยากเปลี่ยนภายหลังให้ตั้ง ENV: UPLOAD_DIR=/home/tjc/DB_TJC-Corporation/uploads
+// 4. ตั้งค่า Upload
 const __filename = fileURLToPath(import.meta.url);
 const DEFAULT_UPLOAD_DIR = "/home/tjc/DB_TJC-Corporation/uploads";
 const UPLOAD_DIR = process.env.UPLOAD_DIR || DEFAULT_UPLOAD_DIR;
 
-// สร้างโฟลเดอร์ถ้ายังไม่มี
 if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
-// ให้บริการไฟล์ผ่าน URL /uploads/...
 app.use("/uploads", express.static(UPLOAD_DIR));
 
 const upload = multer({
@@ -220,7 +226,6 @@ async function dynamicUpdate(table, id, updates) {
   for (const [key, value] of Object.entries(updates)) {
     if (key === "id") continue;
 
-    // jsonb fields
     if (key === "subcategories" || key === "address_lines" || key === "gallery") {
       fields.push(`${key}=$${idx++}::jsonb`);
       values.push(JSON.stringify(value));
@@ -254,7 +259,6 @@ app.post("/api/auth/login", async (req, res) => {
     const { username, password } = req.body;
     const { rows } = await pool.query("SELECT * FROM public.admin_users WHERE username=$1", [username]);
 
-    // NOTE: ตอนนี้ยังเทียบแบบ plaintext เพื่อไม่ให้ระบบเดิมพัง
     if (!rows.length || rows[0].password_hash !== password) {
       return res.status(401).json({ message: "Login failed" });
     }
@@ -465,7 +469,7 @@ app.post("/api/services", authRequired, adminRequired, async (req, res) => {
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
-});;
+});
 
 app.patch("/api/services/:id", authRequired, adminRequired, async (req, res) => {
   try {
@@ -486,7 +490,7 @@ app.delete("/api/services/:id", authRequired, adminRequired, async (req, res) =>
   }
 });
 
-// --- 📰 6. News (✅ ปรับให้ตรงกับตารางจริง + รองรับ payload เก่า) ---
+// --- 📰 6. News ---
 app.get("/api/news", async (req, res) => {
   try {
     const { rows } = await pool.query("SELECT * FROM public.news ORDER BY sort_order ASC, id ASC");
@@ -510,12 +514,11 @@ app.get("/api/news/:id", async (req, res) => {
 
 app.post("/api/news", authRequired, adminRequired, async (req, res) => {
   try {
-    // รองรับทั้งของเดิมและของใหม่
     const title = req.body.title ?? "";
-    const desc1 = req.body.desc1 ?? req.body.content ?? ""; // content -> desc1
+    const desc1 = req.body.desc1 ?? req.body.content ?? "";
     const desc2 = req.body.desc2 ?? "";
-    const date_label = req.body.date_label ?? req.body.dateLabel ?? ""; // กันพลาด
-    const cover_image_url = req.body.cover_image_url ?? req.body.image_url ?? ""; // image_url -> cover_image_url
+    const date_label = req.body.date_label ?? req.body.dateLabel ?? "";
+    const cover_image_url = req.body.cover_image_url ?? req.body.image_url ?? "";
     const gallery = req.body.gallery ?? [];
     const sort_order = req.body.sort_order ?? 0;
     const is_active = req.body.is_active ?? true;
@@ -539,20 +542,11 @@ app.post("/api/news", authRequired, adminRequired, async (req, res) => {
 
 app.patch("/api/news/:id", authRequired, adminRequired, async (req, res) => {
   try {
-    // map ของเก่าไปของใหม่ (เพื่อไม่ให้ dynamicUpdate อัปเดตผิดคอลัมน์)
     if (req.body.content !== undefined && req.body.desc1 === undefined) req.body.desc1 = req.body.content;
     if (req.body.image_url !== undefined && req.body.cover_image_url === undefined) req.body.cover_image_url = req.body.image_url;
 
-    // กันคีย์แปลก ๆ ไม่ให้หลุดเข้ากับตาราง (เช่น content/image_url)
     const allowed = new Set([
-      "title",
-      "desc1",
-      "desc2",
-      "date_label",
-      "cover_image_url",
-      "gallery",
-      "is_active",
-      "sort_order",
+      "title", "desc1", "desc2", "date_label", "cover_image_url", "gallery", "is_active", "sort_order",
     ]);
 
     const cleaned = {};
@@ -591,9 +585,7 @@ app.get("/api/certifications", async (req, res) => {
 
 app.post("/api/certifications", authRequired, adminRequired, async (req, res) => {
   try {
-    // รับ description เพิ่มเข้ามา
     const { title, description, image_url, sort_order } = req.body;
-
     const { rows } = await pool.query(
       `INSERT INTO certifications (title, description, image_url, sort_order) 
        VALUES ($1, $2, $3, $4) RETURNING *`,
@@ -666,7 +658,61 @@ app.delete("/api/customer-logos/:id", authRequired, adminRequired, async (req, r
   }
 });
 
-// --- 📞 9. Contact Page ---
+// --- 🤝 9. Partner Logos (✅ เพิ่มใหม่) ---
+app.get("/api/partner-logos", async (req, res) => {
+  try {
+    // ดึงเฉพาะที่ active=true ถ้าจะใช้แสดงหน้าเว็บ แต่ถ้าในหน้า Admin อาจต้องดึงทั้งหมด
+    const { rows } = await pool.query("SELECT * FROM partner_logos WHERE is_active=true ORDER BY sort_order ASC");
+    res.json(rows);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// สำหรับ Admin ดึงทั้งหมด
+app.get("/api/admin/partner-logos", authRequired, adminRequired, async (req, res) => {
+  try {
+    const { rows } = await pool.query("SELECT * FROM partner_logos ORDER BY sort_order ASC");
+    res.json(rows);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/partner-logos", authRequired, adminRequired, async (req, res) => {
+  try {
+    const { name, image_url, sort_order, is_active } = req.body;
+    const { rows } = await pool.query(
+      `INSERT INTO partner_logos (name, image_url, sort_order, is_active) VALUES ($1, $2, $3, $4) RETURNING *`,
+      [name, image_url || "", sort_order || 0, is_active ?? true]
+    );
+    res.json(rows[0]);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.patch("/api/partner-logos/:id", authRequired, adminRequired, async (req, res) => {
+  try {
+    const updated = await dynamicUpdate("partner_logos", req.params.id, req.body);
+    if (!updated) return res.status(404).json({ message: "Not found" });
+    res.json(updated);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete("/api/partner-logos/:id", authRequired, adminRequired, async (req, res) => {
+  try {
+    await pool.query("DELETE FROM partner_logos WHERE id=$1", [req.params.id]);
+    res.json({ message: "Deleted" });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+
+// --- 📞 10. Contact Page ---
 app.get("/api/site/contact", async (req, res) => {
   try {
     const { rows } = await pool.query("SELECT * FROM contact_page WHERE id=1");
@@ -735,7 +781,7 @@ app.get("/health", (req, res) => {
   res.json({ status: "ok" });
 });
 
-// 10. Start Server
+// 11. Start Server
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`✅ Server running on http://0.0.0.0:${PORT}`);
   console.log(`📦 Upload dir: ${UPLOAD_DIR}`);
