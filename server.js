@@ -77,7 +77,8 @@ async function initDB() {
       image_url TEXT DEFAULT '',
       sort_order INT DEFAULT 0,
       is_active BOOLEAN DEFAULT true,
-      cta_url TEXT DEFAULT ''
+      cta_url TEXT DEFAULT '',
+      specifications JSONB DEFAULT '[]' --
     );
 
     CREATE TABLE IF NOT EXISTS services (
@@ -403,13 +404,15 @@ app.get("/api/products/:id", async (req, res) => {
 
 app.post("/api/products", authRequired, adminRequired, async (req, res) => {
   try {
-    const { category, subcategory, name, description, image_url, sort_order, is_active, cta_url } = req.body;
+    // รับ specifications เข้ามาด้วย
+    const { category, subcategory, name, description, image_url, sort_order, is_active, cta_url, specifications } = req.body;
+
     if (!category || !name) return res.status(400).json({ message: "Category and Name are required" });
 
     const { rows } = await pool.query(
-      `INSERT INTO products (category, subcategory, name, description, image_url, sort_order, is_active, cta_url)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
-      [category, subcategory || "", name, description || "", image_url || "", sort_order || 0, is_active ?? true, cta_url || ""]
+      `INSERT INTO products (category, subcategory, name, description, image_url, sort_order, is_active, cta_url, specifications)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb) RETURNING *`,
+      [category, subcategory || "", name, description || "", image_url || "", sort_order || 0, is_active ?? true, cta_url || "", JSON.stringify(specifications || [])]
     );
     res.json(rows[0]);
   } catch (e) {
@@ -419,6 +422,7 @@ app.post("/api/products", authRequired, adminRequired, async (req, res) => {
 
 app.patch("/api/products/:id", authRequired, adminRequired, async (req, res) => {
   try {
+    // รองรับการอัปเดต specifications
     const updated = await dynamicUpdate("products", req.params.id, req.body);
     if (!updated) return res.status(404).json({ message: "Not found or No changes" });
     res.json(updated);
