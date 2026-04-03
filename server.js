@@ -78,7 +78,7 @@ async function initDB() {
       sort_order INT DEFAULT 0,
       is_active BOOLEAN DEFAULT true,
       cta_url TEXT DEFAULT '',
-      specifications JSONB DEFAULT '[]' --
+      specifications JSONB DEFAULT '[]'
     );
 
     CREATE TABLE IF NOT EXISTS services (
@@ -150,25 +150,29 @@ async function initDB() {
       line_label VARCHAR(100),
       line_url TEXT,
       line_icon_url TEXT,
-      facebook_label VARCHAR(100), -- ✅ เพิ่มคอลัมน์ Facebook
-      facebook_url TEXT,           -- ✅ เพิ่มคอลัมน์ Facebook
+      line_qr_url TEXT, -- ✅ เพิ่มคอลัมน์เก็บ QR Code
+      facebook_label VARCHAR(100),
+      facebook_url TEXT,
       address_lines JSONB DEFAULT '[]',
       open_hours TEXT,
       map_title TEXT,
       map_embed_url TEXT,
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
-    REATE TABLE IF NOT EXISTS warranty_policy (
+
+    -- ✅ แก้คำสั่งสร้างตาราง warranty_policy ที่พิมพ์ผิด
+    CREATE TABLE IF NOT EXISTS warranty_policy (
       id INT PRIMARY KEY,
       heading TEXT DEFAULT 'นโยบายการรับประกันสินค้า',
-      general_terms JSONB DEFAULT '[]', -- เก็บ Array ของ { title, desc }
+      general_terms JSONB DEFAULT '[]',
       exclusion_heading TEXT DEFAULT 'เงื่อนไขที่อยู่นอกเหนือการรับประกัน',
-      exclusions JSONB DEFAULT '[]',    -- เก็บ Array ของ String
+      exclusions JSONB DEFAULT '[]',
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
 
     INSERT INTO warranty_policy (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
 
+    -- ✅ ตรวจสอบและเพิ่มคอลัมน์ใหม่ในกรณีที่ตาราง contact_page ถูกสร้างไปก่อนหน้าแล้ว
     DO $$
     BEGIN
       IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='contact_page' AND column_name='facebook_label') THEN
@@ -176,6 +180,10 @@ async function initDB() {
       END IF;
       IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='contact_page' AND column_name='facebook_url') THEN
           ALTER TABLE contact_page ADD COLUMN facebook_url TEXT;
+      END IF;
+      -- ✅ เพิ่มเช็ค line_qr_url ให้แอดอัตโนมัติถ้ายังไม่มี
+      IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='contact_page' AND column_name='line_qr_url') THEN
+          ALTER TABLE contact_page ADD COLUMN line_qr_url TEXT;
       END IF;
     END $$;
 
@@ -761,8 +769,9 @@ app.put("/api/site/contact", authRequired, adminRequired, async (req, res) => {
       line_label,
       line_url,
       line_icon_url,
-      facebook_label, // ✅ รับค่า Facebook
-      facebook_url,   // ✅ รับค่า Facebook
+      line_qr_url,    // ✅ 1. รับค่า QR Code จาก Frontend
+      facebook_label,
+      facebook_url,
       address_lines,
       open_hours,
       map_title,
@@ -772,17 +781,18 @@ app.put("/api/site/contact", authRequired, adminRequired, async (req, res) => {
     const query = `
       INSERT INTO contact_page (
         id, heading, description, email, phone,
-        line_label, line_url, line_icon_url,
-        facebook_label, facebook_url, -- ✅ เพิ่มลง Insert
+        line_label, line_url, line_icon_url, line_qr_url, -- ✅ 2. เพิ่มคอลัมน์ใน Insert
+        facebook_label, facebook_url, 
         address_lines, open_hours, map_title, map_embed_url
       )
-      VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13)
+      VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12, $13, $14) -- ✅ 3. เลื่อนลำดับเป็น $14
       ON CONFLICT (id) DO UPDATE SET
         heading = EXCLUDED.heading, description = EXCLUDED.description,
         email = EXCLUDED.email, phone = EXCLUDED.phone,
         line_label = EXCLUDED.line_label, line_url = EXCLUDED.line_url,
-        line_icon_url = EXCLUDED.line_icon_url,
-        facebook_label = EXCLUDED.facebook_label, facebook_url = EXCLUDED.facebook_url, -- ✅ อัปเดตค่าเมื่อมีข้อมูลซ้ำ
+        line_icon_url = EXCLUDED.line_icon_url, 
+        line_qr_url = EXCLUDED.line_qr_url, -- ✅ 4. เพิ่มคอลัมน์ใน Update
+        facebook_label = EXCLUDED.facebook_label, facebook_url = EXCLUDED.facebook_url, 
         address_lines = EXCLUDED.address_lines,
         open_hours = EXCLUDED.open_hours, map_title = EXCLUDED.map_title,
         map_embed_url = EXCLUDED.map_embed_url, updated_at = CURRENT_TIMESTAMP
@@ -790,19 +800,20 @@ app.put("/api/site/contact", authRequired, adminRequired, async (req, res) => {
     `;
 
     const values = [
-      heading,
-      description,
-      email,
-      phone,
-      line_label,
-      line_url,
-      line_icon_url,
-      facebook_label, // $8
-      facebook_url,   // $9
-      JSON.stringify(address_lines || []), // $10
-      open_hours,     // $11
-      map_title,      // $12
-      map_embed_url,  // $13
+      heading,        // $1
+      description,    // $2
+      email,          // $3
+      phone,          // $4
+      line_label,     // $5
+      line_url,       // $6
+      line_icon_url,  // $7
+      line_qr_url,    // $8  ✅ 5. แทรกค่า QR Code
+      facebook_label, // $9
+      facebook_url,   // $10
+      JSON.stringify(address_lines || []), // $11
+      open_hours,     // $12
+      map_title,      // $13
+      map_embed_url,  // $14
     ];
 
     const { rows } = await pool.query(query, values);
