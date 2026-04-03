@@ -160,31 +160,60 @@ async function initDB() {
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
 
-    -- ✅ แก้คำสั่งสร้างตาราง warranty_policy ที่พิมพ์ผิด
     CREATE TABLE IF NOT EXISTS warranty_policy (
       id INT PRIMARY KEY,
       heading TEXT DEFAULT 'นโยบายการรับประกันสินค้า',
       general_terms JSONB DEFAULT '[]',
       exclusion_heading TEXT DEFAULT 'เงื่อนไขที่อยู่นอกเหนือการรับประกัน',
       exclusions JSONB DEFAULT '[]',
+      
+      -- คอลัมน์ที่เพิ่มเข้ามาใหม่สำหรับการรับประกัน
+      product_warranty_heading TEXT,
+      product_warranty_desc TEXT,
+      product_warranties JSONB DEFAULT '[]',
+      claim_heading TEXT,
+      claim_steps JSONB DEFAULT '[]',
+      claim_notes TEXT,
+      
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
 
     INSERT INTO warranty_policy (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
 
-    -- ✅ ตรวจสอบและเพิ่มคอลัมน์ใหม่ในกรณีที่ตาราง contact_page ถูกสร้างไปก่อนหน้าแล้ว
+    -- ✅ ตรวจสอบและเพิ่มคอลัมน์ใหม่ในกรณีที่ตารางถูกสร้างไปก่อนหน้าแล้ว
     DO $$
     BEGIN
+      -- อัปเดตตาราง contact_page
       IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='contact_page' AND column_name='facebook_label') THEN
           ALTER TABLE contact_page ADD COLUMN facebook_label VARCHAR(100);
       END IF;
       IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='contact_page' AND column_name='facebook_url') THEN
           ALTER TABLE contact_page ADD COLUMN facebook_url TEXT;
       END IF;
-      -- ✅ เพิ่มเช็ค line_qr_url ให้แอดอัตโนมัติถ้ายังไม่มี
       IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='contact_page' AND column_name='line_qr_url') THEN
           ALTER TABLE contact_page ADD COLUMN line_qr_url TEXT;
       END IF;
+
+      -- ✅ อัปเดตตาราง warranty_policy
+      IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='warranty_policy' AND column_name='product_warranty_heading') THEN
+          ALTER TABLE warranty_policy ADD COLUMN product_warranty_heading TEXT;
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='warranty_policy' AND column_name='product_warranty_desc') THEN
+          ALTER TABLE warranty_policy ADD COLUMN product_warranty_desc TEXT;
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='warranty_policy' AND column_name='product_warranties') THEN
+          ALTER TABLE warranty_policy ADD COLUMN product_warranties JSONB DEFAULT '[]';
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='warranty_policy' AND column_name='claim_heading') THEN
+          ALTER TABLE warranty_policy ADD COLUMN claim_heading TEXT;
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='warranty_policy' AND column_name='claim_steps') THEN
+          ALTER TABLE warranty_policy ADD COLUMN claim_steps JSONB DEFAULT '[]';
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='warranty_policy' AND column_name='claim_notes') THEN
+          ALTER TABLE warranty_policy ADD COLUMN claim_notes TEXT;
+      END IF;
+
     END $$;
 
     INSERT INTO admin_users (username, password_hash, role)
@@ -849,30 +878,60 @@ app.get("/api/site/warranty", async (req, res) => {
 
 app.put("/api/site/warranty", authRequired, adminRequired, async (req, res) => {
   try {
-    const { heading, general_terms, exclusion_heading, exclusions } = req.body.data;
+    const {
+      heading,
+      general_terms,
+      exclusion_heading,
+      exclusions,
+      product_warranty_heading, // ✅ รับค่าใหม่
+      product_warranty_desc,    // ✅ รับค่าใหม่
+      product_warranties,       // ✅ รับค่าใหม่
+      claim_heading,            // ✅ รับค่าใหม่
+      claim_steps,              // ✅ รับค่าใหม่
+      claim_notes               // ✅ รับค่าใหม่
+    } = req.body.data;
 
     const query = `
-      INSERT INTO warranty_policy (id, heading, general_terms, exclusion_heading, exclusions)
-      VALUES (1, $1, $2::jsonb, $3, $4::jsonb)
+      INSERT INTO warranty_policy (
+        id, 
+        heading, general_terms, 
+        exclusion_heading, exclusions,
+        product_warranty_heading, product_warranty_desc, product_warranties,
+        claim_heading, claim_steps, claim_notes
+      )
+      VALUES (1, $1, $2::jsonb, $3, $4::jsonb, $5, $6, $7::jsonb, $8, $9::jsonb, $10)
       ON CONFLICT (id) DO UPDATE SET
         heading = EXCLUDED.heading,
         general_terms = EXCLUDED.general_terms,
         exclusion_heading = EXCLUDED.exclusion_heading,
         exclusions = EXCLUDED.exclusions,
+        product_warranty_heading = EXCLUDED.product_warranty_heading,
+        product_warranty_desc = EXCLUDED.product_warranty_desc,
+        product_warranties = EXCLUDED.product_warranties,
+        claim_heading = EXCLUDED.claim_heading,
+        claim_steps = EXCLUDED.claim_steps,
+        claim_notes = EXCLUDED.claim_notes,
         updated_at = CURRENT_TIMESTAMP
       RETURNING *
     `;
 
     const values = [
-      heading || "นโยบายการรับประกันสินค้า",
+      heading,
       JSON.stringify(general_terms || []),
-      exclusion_heading || "เงื่อนไขที่อยู่นอกเหนือการรับประกัน",
-      JSON.stringify(exclusions || [])
+      exclusion_heading,
+      JSON.stringify(exclusions || []),
+      product_warranty_heading,
+      product_warranty_desc,
+      JSON.stringify(product_warranties || []),
+      claim_heading,
+      JSON.stringify(claim_steps || []),
+      claim_notes
     ];
 
     const { rows } = await pool.query(query, values);
     res.json({ data: rows[0] });
   } catch (e) {
+    console.error(e);
     res.status(500).json({ error: e.message });
   }
 });
