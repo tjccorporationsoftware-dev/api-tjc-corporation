@@ -158,6 +158,15 @@ async function initDB() {
       map_embed_url TEXT,
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
+    CREATE TABLE IF NOT EXISTS warranty_policy (
+      id INT PRIMARY KEY,
+      heading TEXT DEFAULT 'นโยบายการรับประกันสินค้า',
+      description TEXT DEFAULT 'รายละเอียดการรับประกัน',
+      general_terms JSONB DEFAULT '[]', -- เก็บ Array ของ {icon, title, desc}
+      exclusion_heading TEXT DEFAULT 'เงื่อนไขที่อยู่นอกเหนือการรับประกัน',
+      exclusions JSONB DEFAULT '[]',    -- เก็บ Array ของ String
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
 
     DO $$
     BEGIN
@@ -793,6 +802,67 @@ app.put("/api/site/contact", authRequired, adminRequired, async (req, res) => {
       open_hours,     // $11
       map_title,      // $12
       map_embed_url,  // $13
+    ];
+
+    const { rows } = await pool.query(query, values);
+    res.json({ data: rows[0] });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get("/api/site/warranty", async (req, res) => {
+  try {
+    const { rows } = await pool.query("SELECT * FROM warranty_policy WHERE id=1");
+    // หากข้อมูลเพิ่งถูกสร้างขึ้นมาใหม่ (ค่าเป็น null หรือว่างๆ) เราจะส่งค่า Default กลับไปให้
+    const data = rows[0] || {};
+
+    // ตั้งค่า Default ถ้ายางไม่มีข้อมูล
+    if (!data.general_terms || data.general_terms.length === 0) {
+      data.general_terms = [
+        { icon: "bx-time-five", title: "ระยะเวลาการรับประกัน", desc: "ระยะเวลาขึ้นอยู่กับหน้าเว็บไซต์" },
+        { icon: "bx-calendar-check", title: "การเริ่มนับระยะเวลา", desc: "เริ่มนับตั้งแต่วันที่ลูกค้าได้รับสินค้าแล้วเท่านั้น" }
+      ];
+    }
+    if (!data.exclusions || data.exclusions.length === 0) {
+      data.exclusions = ["สินค้าถูกดัดแปลง แก้ไข ถูกแกะ", "การใช้งานผิดประเภท ความประมาท"];
+    }
+
+    res.json({ data });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.put("/api/site/warranty", authRequired, adminRequired, async (req, res) => {
+  try {
+    const {
+      heading,
+      description,
+      general_terms,
+      exclusion_heading,
+      exclusions
+    } = req.body.data;
+
+    const query = `
+      INSERT INTO warranty_policy (id, heading, description, general_terms, exclusion_heading, exclusions)
+      VALUES (1, $1, $2, $3::jsonb, $4, $5::jsonb)
+      ON CONFLICT (id) DO UPDATE SET
+        heading = EXCLUDED.heading,
+        description = EXCLUDED.description,
+        general_terms = EXCLUDED.general_terms,
+        exclusion_heading = EXCLUDED.exclusion_heading,
+        exclusions = EXCLUDED.exclusions,
+        updated_at = CURRENT_TIMESTAMP
+      RETURNING *
+    `;
+
+    const values = [
+      heading || "นโยบายการรับประกันสินค้า",
+      description || "",
+      JSON.stringify(general_terms || []),
+      exclusion_heading || "เงื่อนไขที่อยู่นอกเหนือการรับประกัน",
+      JSON.stringify(exclusions || [])
     ];
 
     const { rows } = await pool.query(query, values);
