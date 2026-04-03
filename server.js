@@ -150,12 +150,24 @@ async function initDB() {
       line_label VARCHAR(100),
       line_url TEXT,
       line_icon_url TEXT,
+      facebook_label VARCHAR(100), -- ✅ เพิ่มคอลัมน์ Facebook
+      facebook_url TEXT,           -- ✅ เพิ่มคอลัมน์ Facebook
       address_lines JSONB DEFAULT '[]',
       open_hours TEXT,
       map_title TEXT,
       map_embed_url TEXT,
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
+
+    DO $$
+    BEGIN
+      IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='contact_page' AND column_name='facebook_label') THEN
+          ALTER TABLE contact_page ADD COLUMN facebook_label VARCHAR(100);
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='contact_page' AND column_name='facebook_url') THEN
+          ALTER TABLE contact_page ADD COLUMN facebook_url TEXT;
+      END IF;
+    END $$;
 
     INSERT INTO admin_users (username, password_hash, role)
     VALUES ('admin', '123456', 'admin')
@@ -727,6 +739,54 @@ app.get("/api/site/contact", async (req, res) => {
   }
 });
 
+// --- ส่วนที่ 1: แก้ไขฟังก์ชัน initDB ให้รองรับคอลัมน์ Facebook ---
+async function initDB() {
+  const createTablesQuery = `
+    -- ... (โค้ดสร้างตารางอื่นๆ ของคุณคงเดิม) ...
+
+    CREATE TABLE IF NOT EXISTS contact_page (
+      id INT PRIMARY KEY,
+      heading TEXT,
+      description TEXT,
+      email VARCHAR(255),
+      phone VARCHAR(50),
+      line_label VARCHAR(100),
+      line_url TEXT,
+      line_icon_url TEXT,
+      facebook_label VARCHAR(100), -- ✅ เพิ่มคอลัมน์ Facebook
+      facebook_url TEXT,           -- ✅ เพิ่มคอลัมน์ Facebook
+      address_lines JSONB DEFAULT '[]',
+      open_hours TEXT,
+      map_title TEXT,
+      map_embed_url TEXT,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    -- ✅ คำสั่งตรวจสอบและเพิ่มคอลัมน์อัตโนมัติ (กรณีมีตารางเดิมอยู่แล้ว)
+    DO $$
+    BEGIN
+      IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='contact_page' AND column_name='facebook_label') THEN
+          ALTER TABLE contact_page ADD COLUMN facebook_label VARCHAR(100);
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='contact_page' AND column_name='facebook_url') THEN
+          ALTER TABLE contact_page ADD COLUMN facebook_url TEXT;
+      END IF;
+    END $$;
+
+    INSERT INTO admin_users (username, password_hash, role)
+    VALUES ('admin', '123456', 'admin')
+    ON CONFLICT (username) DO NOTHING;
+  `;
+
+  try {
+    await pool.query(createTablesQuery);
+    console.log("✅ Database Tables Initialized (with Facebook fields)!");
+  } catch (e) {
+    console.error("❌ Failed to Initialize Database:", e.message);
+  }
+}
+
+// --- ส่วนที่ 2: แก้ไข API PUT /api/site/contact ---
 app.put("/api/site/contact", authRequired, adminRequired, async (req, res) => {
   try {
     const {
@@ -737,6 +797,8 @@ app.put("/api/site/contact", authRequired, adminRequired, async (req, res) => {
       line_label,
       line_url,
       line_icon_url,
+      facebook_label, // ✅ รับค่า Facebook
+      facebook_url,   // ✅ รับค่า Facebook
       address_lines,
       open_hours,
       map_title,
@@ -747,14 +809,17 @@ app.put("/api/site/contact", authRequired, adminRequired, async (req, res) => {
       INSERT INTO contact_page (
         id, heading, description, email, phone,
         line_label, line_url, line_icon_url,
+        facebook_label, facebook_url, -- ✅ เพิ่มลง Insert
         address_lines, open_hours, map_title, map_embed_url
       )
-      VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11)
+      VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13)
       ON CONFLICT (id) DO UPDATE SET
         heading = EXCLUDED.heading, description = EXCLUDED.description,
         email = EXCLUDED.email, phone = EXCLUDED.phone,
         line_label = EXCLUDED.line_label, line_url = EXCLUDED.line_url,
-        line_icon_url = EXCLUDED.line_icon_url, address_lines = EXCLUDED.address_lines,
+        line_icon_url = EXCLUDED.line_icon_url,
+        facebook_label = EXCLUDED.facebook_label, facebook_url = EXCLUDED.facebook_url, -- ✅ อัปเดตค่าเมื่อมีข้อมูลซ้ำ
+        address_lines = EXCLUDED.address_lines,
         open_hours = EXCLUDED.open_hours, map_title = EXCLUDED.map_title,
         map_embed_url = EXCLUDED.map_embed_url, updated_at = CURRENT_TIMESTAMP
       RETURNING *
@@ -768,10 +833,12 @@ app.put("/api/site/contact", authRequired, adminRequired, async (req, res) => {
       line_label,
       line_url,
       line_icon_url,
-      JSON.stringify(address_lines || []),
-      open_hours,
-      map_title,
-      map_embed_url,
+      facebook_label, // $8
+      facebook_url,   // $9
+      JSON.stringify(address_lines || []), // $10
+      open_hours,     // $11
+      map_title,      // $12
+      map_embed_url,  // $13
     ];
 
     const { rows } = await pool.query(query, values);
