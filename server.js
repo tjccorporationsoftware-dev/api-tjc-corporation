@@ -13,10 +13,16 @@ dotenv.config();
 const app = express();
 app.use(express.json({ limit: "10mb" }));
 
-// 2. ตั้งค่า CORS
+// 2. ตั้งค่า CORS (✅ แก้ไขให้รองรับการรันจาก Localhost และโดเมนจริงแล้ว)
 app.use(
   cors({
-    origin: true,
+    origin: [
+      "http://localhost:3000",
+      "https://tjc.co.th",
+      "https://www.tjc.co.th",
+      "https://api.tjc.co.th"
+    ],
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     credentials: true,
   })
 );
@@ -30,10 +36,10 @@ const pool = new Pool({
 const JWT_SECRET = process.env.JWT_SECRET || "secret";
 const PORT = Number(process.env.PORT || 4000);
 
-// --- ฟังก์ชันสร้างตารางอัตโนมัติ (ปรับให้ตรงกับ DB จริง โดยเฉพาะ news) ---
+// --- ฟังก์ชันสร้างตารางอัตโนมัติ (✅ มีแค่ตัวเดียว ไม่ซ้ำแล้ว) ---
 async function initDB() {
   const createTablesQuery = `
-    -- Helper function for updated_at (ถ้ามีอยู่แล้วจะไม่ทับ)
+    -- Helper function for updated_at
     CREATE OR REPLACE FUNCTION public.set_updated_at()
     RETURNS trigger
     LANGUAGE plpgsql
@@ -78,7 +84,7 @@ async function initDB() {
       sort_order INT DEFAULT 0,
       is_active BOOLEAN DEFAULT true,
       cta_url TEXT DEFAULT '',
-      specifications JSONB DEFAULT '[]' --
+      specifications JSONB DEFAULT '[]'
     );
 
     CREATE TABLE IF NOT EXISTS services (
@@ -132,7 +138,6 @@ async function initDB() {
       sort_order INT DEFAULT 0
     );
     
-    -- ✅ เพิ่มตาราง partner_logos
     CREATE TABLE IF NOT EXISTS partner_logos (
       id SERIAL PRIMARY KEY,
       name VARCHAR(255) NOT NULL,
@@ -150,8 +155,8 @@ async function initDB() {
       line_label VARCHAR(100),
       line_url TEXT,
       line_icon_url TEXT,
-      facebook_label VARCHAR(100), -- ✅ เพิ่มคอลัมน์ Facebook
-      facebook_url TEXT,           -- ✅ เพิ่มคอลัมน์ Facebook
+      facebook_label VARCHAR(100), -- ✅ คอลัมน์ Facebook
+      facebook_url TEXT,           -- ✅ คอลัมน์ Facebook
       address_lines JSONB DEFAULT '[]',
       open_hours TEXT,
       map_title TEXT,
@@ -159,6 +164,7 @@ async function initDB() {
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
 
+    -- ✅ คำสั่งตรวจสอบและเพิ่มคอลัมน์อัตโนมัติ 
     DO $$
     BEGIN
       IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='contact_page' AND column_name='facebook_label') THEN
@@ -198,6 +204,7 @@ const UPLOAD_DIR = process.env.UPLOAD_DIR || DEFAULT_UPLOAD_DIR;
 
 if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
+app.use("/uploads", express.static(UPLOAD_DIR));
 app.use("/uploads", express.static(UPLOAD_DIR));
 
 const upload = multer({
